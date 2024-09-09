@@ -71,25 +71,14 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var out *os.File
-	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
-		// 创建文件
-		out, err = os.Create(fullPath)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			log.Println(err)
-			return
-		}
-		defer out.Close()
-	} else {
-		// 打开文件
-		out, err = os.OpenFile(fullPath, os.O_APPEND|os.O_WRONLY, 0644)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			log.Println(err)
-			return
-		}
-		defer out.Close()
+	// 创建文件
+	out, err = os.Create(fullPath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Println(err)
+		return
 	}
+	defer out.Close()
 
 	// 将上传的文件内容写入到新文件中
 	if _, err := io.Copy(out, file); err != nil {
