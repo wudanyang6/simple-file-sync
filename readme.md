@@ -4,11 +4,12 @@
 
 ## 功能特点
 
-- 实时监控文件变化
-- 支持全量同步或仅同步git差异文件
+- 实时监控文件变化（创建、修改）
+- **可选的删除/重命名传播**（需通过 `propagate_deletes` 显式开启），并自带去抖以兼容编辑器原子保存
+- 支持全量同步或仅同步 git 差异文件
 - 支持文件忽略模式（正则表达式）
 - 支持路径映射（正则表达式）
-- 支持TOML配置文件
+- 支持 TOML 配置文件
 - 支持多远程目标配置
 
 ## 使用方法
@@ -27,6 +28,7 @@ simple-file-sync client --local-dir=/path/to/local --mode=all --remote-dir=/path
 - `--server-addr`: 服务器地址
 - `--server-token`: 服务器验证令牌
 - `--target`: 指定要使用的远程目标名称
+- `--propagate-deletes`: 是否将本地的删除/重命名事件同步到远端（默认 `false`，需显式开启；显式传入会覆盖配置文件）
 
 #### 忽略和映射
 
@@ -63,6 +65,9 @@ local_dir = "/Users/username/projects/my-project"
 
 # 当前激活的远程目标名称
 active_target = "dev"
+
+# 是否将本地的删除/重命名同步到远端，默认 false（不打开就只同步新增/修改）
+propagate_deletes = false
 
 # 忽略模式 (全值匹配，正则表达式)
 # 注意：程序会自动添加 ^ 和 $ 作为匹配边界，无需手动添加
@@ -117,6 +122,26 @@ simple-file-sync server --port=8120 --token=your-secret-token --limit-dir=/path/
 - `--port`: 监听端口（默认 8120）
 - `--token`: 验证令牌（默认 kfcvme50）
 - `--limit-dir`: 限制上传文件的目录（默认为用户主目录）
+
+服务器接受 multipart POST 到 `/receiver`，根据表单字段 `op` 区分操作：
+
+| op       | 字段                                  | 行为                                                  |
+| -------- | ------------------------------------- | ----------------------------------------------------- |
+| `upload` | `token`, `target`, `file`             | 写入 `target`，按需创建父目录                         |
+| `delete` | `token`, `target`                     | 删除 `target`；目标不存在时返回 200（幂等），不递归   |
+
+`target` 必须是绝对路径并落在 `--limit-dir` 之内，否则返回 400。
+
+## 同步协议简述
+
+客户端通过 fsnotify 监听 `local_dir`：
+
+- `Create` / `Write` → 调度上传任务（`op=upload`）
+- `Remove` / `Rename`：
+  - 如果 **未** 开启 `propagate_deletes`，事件被忽略，远端文件保持不变（默认行为）
+  - 如果开启，则进入删除去抖窗口；窗口内若同路径再次 `Create`/`Write`，则取消删除（典型场景：编辑器原子保存）；去抖到期后下发 `op=delete`
+
+去抖时间默认 `500ms`（可在代码里通过 `DeleteDebounce` 调整）。删除只针对单个文件路径，不会递归删目录。
 
 ## 优先级
 

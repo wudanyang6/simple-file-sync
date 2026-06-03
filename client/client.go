@@ -19,8 +19,22 @@ import (
 )
 
 const (
-	NumWorkers = 30
+	NumWorkers      = 30
+	DefaultDebounce = 500 * time.Millisecond
 )
+
+// syncOp identifies the kind of remote operation a worker should perform.
+type syncOp int
+
+const (
+	opUpload syncOp = iota
+	opDelete
+)
+
+type syncTask struct {
+	op   syncOp
+	path string
+}
 
 type PathMapping struct {
 	SourcePattern *regexp.Regexp
@@ -42,8 +56,19 @@ type Client struct {
 	ActiveTarget   string // 当前激活的远程目标名称
 	PathMappings   []PathMapping
 	IgnorePatterns []*regexp.Regexp
-	uploadChan     chan string
-	watcher        *fsnotify.Watcher
+	HTTPClient     *http.Client
+	// PropagateDeletes gates whether local Remove/Rename events are forwarded to
+	// the remote as op=delete. Off by default — must be explicitly enabled.
+	PropagateDeletes bool
+	// DeleteDebounce delays remote deletion to allow editor atomic-saves
+	// (write-temp + rename) to cancel a pending delete. Default DefaultDebounce.
+	DeleteDebounce time.Duration
+
+	uploadChan chan syncTask
+	watcher    *fsnotify.Watcher
+
+	pendingMu      sync.Mutex
+	pendingDeletes map[string]*time.Timer
 }
 
 func NewClient(mode, baseDir string) *Client {
@@ -53,7 +78,10 @@ func NewClient(mode, baseDir string) *Client {
 		RemoteTargets:  []RemoteTarget{},
 		PathMappings:   []PathMapping{},
 		IgnorePatterns: []*regexp.Regexp{},
-		uploadChan:     make(chan string, NumWorkers),
+		HTTPClient:     &http.Client{Timeout: 30 * time.Second},
+		DeleteDebounce: DefaultDebounce,
+		uploadChan:     make(chan syncTask, NumWorkers),
+		pendingDeletes: make(map[string]*time.Timer),
 	}
 }
 
@@ -207,42 +235,38 @@ func (c *Client) watcherThread() func() {
 				}
 				log.Println(event)
 
-				// 使用ShouldIgnore方法判断是否应该忽略文件
 				if c.ShouldIgnore(event.Name) {
 					log.Println("Ignoring file:", event.Name)
 					continue
 				}
 
-				fi, err := os.Stat(event.Name)
-
-				if event.Op&fsnotify.Create == fsnotify.Create {
+				switch {
+				case event.Op&fsnotify.Create == fsnotify.Create:
 					log.Println("Detected new file or directory:", event.Name)
-
-					if err == nil && fi.IsDir() {
-						// 检查目录是否应该被忽略
-						if c.ShouldIgnore(event.Name) {
-							log.Println("Ignoring directory:", event.Name)
-							continue
-						}
-
-						errDir := c.watcher.Add(event.Name)
-						log.Println("Watching new dir" + event.Name)
-						if errDir != nil {
+					c.cancelPendingDelete(event.Name)
+					if fi, err := os.Stat(event.Name); err == nil && fi.IsDir() {
+						if errDir := c.watcher.Add(event.Name); errDir != nil {
 							log.Println("Error adding directory to watcher:", event.Name, errDir)
+						} else {
+							log.Println("Watching new dir " + event.Name)
 						}
 						continue
 					}
-
 					time.Sleep(2 * time.Second) // 确保文件已完全写入
-					c.uploadChan <- event.Name
-				} else if event.Op&fsnotify.Write == fsnotify.Write {
+					c.uploadChan <- syncTask{op: opUpload, path: event.Name}
+				case event.Op&fsnotify.Write == fsnotify.Write:
 					log.Println("Detected file change:", event.Name)
-					time.Sleep(2 * time.Second) // 确保文件已完全写入
-					c.uploadChan <- event.Name
-				} else if event.Op&fsnotify.Remove == fsnotify.Remove {
-					log.Println("Detected file removal, but ignore:", event.Name)
-				} else if event.Op&fsnotify.Rename == fsnotify.Rename {
-					log.Println("Detected file rename, but ignore:", event.Name)
+					c.cancelPendingDelete(event.Name)
+					time.Sleep(2 * time.Second)
+					c.uploadChan <- syncTask{op: opUpload, path: event.Name}
+				case event.Op&fsnotify.Remove == fsnotify.Remove,
+					event.Op&fsnotify.Rename == fsnotify.Rename:
+					if !c.PropagateDeletes {
+						log.Println("Delete propagation disabled, ignoring:", event.Name)
+						continue
+					}
+					log.Println("Detected file removal/rename, scheduling delete:", event.Name)
+					c.scheduleDelete(event.Name)
 				}
 			case err, ok := <-c.watcher.Errors:
 				if !ok {
@@ -254,17 +278,56 @@ func (c *Client) watcherThread() func() {
 	}
 }
 
+// scheduleDelete enqueues a remote-delete task after DeleteDebounce. A subsequent
+// Create/Write for the same path within the window cancels the delete (atomic
+// editor saves frequently produce Rename then Create).
+func (c *Client) scheduleDelete(path string) {
+	c.pendingMu.Lock()
+	defer c.pendingMu.Unlock()
+	if existing, ok := c.pendingDeletes[path]; ok {
+		existing.Stop()
+	}
+	delay := c.DeleteDebounce
+	if delay <= 0 {
+		delay = DefaultDebounce
+	}
+	c.pendingDeletes[path] = time.AfterFunc(delay, func() {
+		c.pendingMu.Lock()
+		delete(c.pendingDeletes, path)
+		c.pendingMu.Unlock()
+		c.uploadChan <- syncTask{op: opDelete, path: path}
+	})
+}
+
+func (c *Client) cancelPendingDelete(path string) {
+	c.pendingMu.Lock()
+	defer c.pendingMu.Unlock()
+	if t, ok := c.pendingDeletes[path]; ok {
+		t.Stop()
+		delete(c.pendingDeletes, path)
+		log.Println("Cancelled pending delete (atomic save):", path)
+	}
+}
+
 func (c *Client) initNewDir() {
-	// 初始化时上传文件
+	files, err := c.CollectFiles(true)
+	if err != nil {
+		log.Fatal("Failed to collect files:", err)
+	}
+	for _, f := range files {
+		c.uploadChan <- syncTask{op: opUpload, path: f}
+	}
+}
+
+// CollectFiles walks LocalDir and returns the list of files to upload according to Mode.
+// When addToWatcher is true, encountered directories are added to the fsnotify watcher.
+func (c *Client) CollectFiles(addToWatcher bool) ([]string, error) {
 	var filesToUpload []string
 
-	// 遍历本地目录收集文件
 	err := filepath.Walk(c.LocalDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
-
-		// 检查是否应该忽略
 		if c.ShouldIgnore(path) {
 			if info.IsDir() {
 				log.Println("Skipping ignored directory:", path)
@@ -273,55 +336,52 @@ func (c *Client) initNewDir() {
 			log.Println("Skipping ignored file:", path)
 			return nil
 		}
-
-		// 处理文件和目录
 		if info.IsDir() {
-			// 添加目录到监视器
-			if err = c.watcher.Add(path); err != nil {
-				log.Println("Failed to add directory to watcher:", path, err)
+			if addToWatcher && c.watcher != nil {
+				if werr := c.watcher.Add(path); werr != nil {
+					log.Println("Failed to add directory to watcher:", path, werr)
+				}
 			}
-			log.Println("Successfully added directory to watcher:", path)
 		} else if c.Mode == "all" {
-			// 全量模式下收集所有文件
 			filesToUpload = append(filesToUpload, path)
 		}
-		
 		return nil
 	})
-	
 	if err != nil {
-		log.Fatal("Failed to traverse directory:", err)
+		return nil, err
 	}
 
-	// 根据模式处理要上传的文件
 	switch c.Mode {
 	case "all":
-		log.Printf("Preparing to upload all files: %d files", len(filesToUpload))
+		log.Printf("Collected files (all): %d", len(filesToUpload))
 	case "git":
-		// 获取Git差异文件
-		gitFiles, err := getGitDiffFiles(c.LocalDir)
-		if err != nil {
-			log.Fatal("Failed to get Git diff files:", err)
+		gitFiles, gerr := getGitDiffFiles(c.LocalDir)
+		if gerr != nil {
+			return nil, gerr
 		}
-
-		// 过滤掉应该被忽略的文件
-		filesToUpload = make([]string, 0, len(gitFiles))
+		filesToUpload = filesToUpload[:0]
 		for _, file := range gitFiles {
 			if !c.ShouldIgnore(file) {
 				filesToUpload = append(filesToUpload, file)
-			} else {
-				log.Println("Skipping ignored Git diff file:", file)
 			}
 		}
-		log.Printf("Preparing to upload Git diff files: %d files", len(filesToUpload))
+		log.Printf("Collected files (git): %d", len(filesToUpload))
 	default:
-		log.Fatalf("Unknown mode: %s", c.Mode)
+		return nil, fmt.Errorf("unknown mode: %s", c.Mode)
 	}
+	return filesToUpload, nil
+}
 
-	// 将文件发送到上传通道
-	for _, file := range filesToUpload {
-		c.uploadChan <- file
+// FullSync was an experimental one-shot sync helper; removed in favor of the
+// always-on watcher which now propagates create/modify/delete events.
+
+// remoteTargetPath returns the mapped target path for a given local file path.
+func (c *Client) remoteTargetPath(localPath, baseDir string, target *RemoteTarget) (string, error) {
+	rel, err := filepath.Rel(baseDir, localPath)
+	if err != nil {
+		return "", err
 	}
+	return c.MapPath(filepath.Join(target.TargetDir, rel)), nil
 }
 
 func (c *Client) uploadFile(filename string, baseDir string) error {
@@ -361,24 +421,22 @@ func (c *Client) uploadFile(filename string, baseDir string) error {
 
 	log.Printf("Uploading file to %s: %s", activeTarget.Name, targetPath)
 
+	writer.WriteField("op", "upload")
 	writer.WriteField("target", targetPath)
 	contentType := writer.FormDataContentType()
 	writer.Close()
 
-	// 创建带有超时时间的客户端
-	client := &http.Client{
-		Timeout: 30 * time.Second, // 设置超时
+	if c.HTTPClient == nil {
+		c.HTTPClient = &http.Client{Timeout: 30 * time.Second}
 	}
-	
-	// 创建请求
+
 	req, err := http.NewRequest("POST", activeTarget.URL, &requestBody)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", contentType)
-	
-	// 发送请求
-	resp, err := client.Do(req)
+
+	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -396,11 +454,65 @@ func (c *Client) uploadFile(filename string, baseDir string) error {
 	return nil
 }
 
+// deleteRemote tells the active target to delete the file at the mapped target path.
+func (c *Client) deleteRemote(filename string, baseDir string) error {
+	activeTarget, err := c.GetActiveTarget()
+	if err != nil {
+		return err
+	}
+	targetPath, err := c.remoteTargetPath(filename, baseDir, activeTarget)
+	if err != nil {
+		return err
+	}
+
+	var requestBody bytes.Buffer
+	writer := multipart.NewWriter(&requestBody)
+	if err := writer.WriteField("token", activeTarget.Token); err != nil {
+		return err
+	}
+	if err := writer.WriteField("op", "delete"); err != nil {
+		return err
+	}
+	if err := writer.WriteField("target", targetPath); err != nil {
+		return err
+	}
+	contentType := writer.FormDataContentType()
+	writer.Close()
+
+	if c.HTTPClient == nil {
+		c.HTTPClient = &http.Client{Timeout: 30 * time.Second}
+	}
+	req, err := http.NewRequest("POST", activeTarget.URL, &requestBody)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", contentType)
+
+	log.Printf("Deleting on %s: %s", activeTarget.Name, targetPath)
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	log.Printf("delete res: %s", string(body))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to delete file: %s", resp.Status)
+	}
+	return nil
+}
+
 func (c *Client) worker(id int) {
-	for filename := range c.uploadChan {
-		err := c.uploadFile(filename, c.LocalDir)
+	for task := range c.uploadChan {
+		var err error
+		switch task.op {
+		case opDelete:
+			err = c.deleteRemote(task.path, c.LocalDir)
+		default:
+			err = c.uploadFile(task.path, c.LocalDir)
+		}
 		if err != nil {
-			log.Printf("Worker %d failed to upload file: %s error: %v\n", id, filename, err)
+			log.Printf("Worker %d failed op=%d path=%s err=%v", id, task.op, task.path, err)
 		}
 	}
 }

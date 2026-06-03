@@ -27,6 +27,8 @@ var (
 	ClientPathMappings   []string
 	ClientConfigFile     string
 	ClientTargetName     string
+	ClientPropagateDeletes bool
+	clientPropagateDeletesSet bool
 )
 
 // RemoteTargetConfig 表示远程目标配置
@@ -45,6 +47,7 @@ type ClientConfig struct {
 	ActiveTarget string              `toml:"active_target"`    // 当前激活的目标名称
 	Ignore       []string            `toml:"ignore"`
 	PathMappings []string            `toml:"path_mappings"`
+	PropagateDeletes bool            `toml:"propagate_deletes"` // 是否将删除/重命名同步到远端，默认 false
 }
 
 // loadConfig 从TOML文件加载配置
@@ -112,6 +115,9 @@ func overrideConfigWithFlags(config *ClientConfig) {
 	}
 	if len(ClientPathMappings) > 0 {
 		config.PathMappings = append(config.PathMappings, ClientPathMappings...)
+	}
+	if clientPropagateDeletesSet {
+		config.PropagateDeletes = ClientPropagateDeletes
 	}
 }
 
@@ -215,6 +221,9 @@ var clientCmd = &cobra.Command{
 			log.Fatalf("加载配置失败: %v", err)
 		}
 
+		// 仅当用户在命令行显式提供 --propagate-deletes 时才覆盖配置文件值
+		clientPropagateDeletesSet = cmd.Flags().Changed("propagate-deletes")
+
 		// 使用命令行参数覆盖配置文件
 		overrideConfigWithFlags(config)
 
@@ -223,63 +232,57 @@ var clientCmd = &cobra.Command{
 			log.Fatalf("配置验证失败: %v", err)
 		}
 
-		// 创建客户端
-		client := client.NewClient(
-			config.Mode,
-			config.LocalDir,
-		)
-		
-		// 添加所有远程目标
-		for _, target := range config.RemoteTargets {
-			client.AddRemoteTarget(
-				target.Name,
-				target.ServerAddr,
-				target.RemoteDir,
-				target.Token,
-			)
+		c, err := buildClient(config)
+		if err != nil {
+			log.Fatalf("初始化客户端失败: %v", err)
 		}
-		
-		// 设置活动目标
-		if err := client.SetActiveTarget(config.ActiveTarget); err != nil {
-			log.Fatalf("设置活动目标失败: %v", err)
-		}
-
-		// 添加忽略模式
-		for _, pattern := range config.Ignore {
-			client.AddIgnorePattern(pattern)
-		}
-
-		// 添加路径映射
-		for _, mapping := range config.PathMappings {
-			parts := strings.Split(mapping, ":")
-			if len(parts) == 2 {
-				client.AddPathMapping(parts[0], parts[1])
-			}
-		}
-
-		// 查找当前活动目标
-		var activeTarget *RemoteTargetConfig
-		for _, target := range config.RemoteTargets {
-			if target.Name == config.ActiveTarget {
-				activeTarget = &target
-				break
-			}
-		}
-		
-		if activeTarget == nil {
-			log.Fatalf("找不到活动目标: %s", config.ActiveTarget)
-		}
-
-		// 默认添加基础目录映射
-		if config.LocalDir != "" && activeTarget.RemoteDir != "" {
-			// 将基础目录作为正则表达式和替换模式，需要转义特殊字符
-			source := "^" + regexp.QuoteMeta(config.LocalDir) + "(/.*)?$"
-			target := activeTarget.RemoteDir + "$1"
-			client.AddPathMapping(source, target)
-		}
-
-		client.Start()
+		c.Start()
 	},
+}
+
+// buildClient wires a *client.Client from a validated ClientConfig.
+// Exposed for tests; does not call Start.
+func buildClient(config *ClientConfig) (*client.Client, error) {
+	c := client.NewClient(config.Mode, config.LocalDir)
+	c.PropagateDeletes = config.PropagateDeletes
+
+	for _, target := range config.RemoteTargets {
+		c.AddRemoteTarget(target.Name, target.ServerAddr, target.RemoteDir, target.Token)
+	}
+
+	if err := c.SetActiveTarget(config.ActiveTarget); err != nil {
+		return nil, fmt.Errorf("设置活动目标失败: %w", err)
+	}
+
+	for _, pattern := range config.Ignore {
+		c.AddIgnorePattern(pattern)
+	}
+
+	for _, mapping := range config.PathMappings {
+		parts := strings.Split(mapping, ":")
+		if len(parts) == 2 {
+			c.AddPathMapping(parts[0], parts[1])
+		}
+	}
+
+	var activeTarget *RemoteTargetConfig
+	for i := range config.RemoteTargets {
+		if config.RemoteTargets[i].Name == config.ActiveTarget {
+			activeTarget = &config.RemoteTargets[i]
+			break
+		}
+	}
+	if activeTarget == nil {
+		return nil, fmt.Errorf("找不到活动目标: %s", config.ActiveTarget)
+	}
+
+	if config.LocalDir != "" && activeTarget.RemoteDir != "" {
+		source := "^" + regexp.QuoteMeta(config.LocalDir) + "(/.*)?$"
+		target := activeTarget.RemoteDir + "$1"
+		c.AddPathMapping(source, target)
+	}
+
+	return c, nil
 }
 
 func init() {
@@ -297,4 +300,7 @@ func init() {
 
 	// 添加配置文件选项
 	clientCmd.Flags().StringVarP(&ClientConfigFile, "config", "c", "", "configuration file path (default \"simple-file-sync.toml\")")
+
+	// 删除/重命名是否传播到远端（默认关闭，需显式开启）
+	clientCmd.Flags().BoolVar(&ClientPropagateDeletes, "propagate-deletes", false, "propagate local file deletions/renames to the remote (default false)")
 }
