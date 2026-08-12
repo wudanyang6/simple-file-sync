@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -16,6 +17,7 @@ type Server struct {
 	Port     int
 	Token    string
 	LimitDir string
+	Listener net.Listener // optional; if set, Start uses it instead of dialing Port
 }
 
 func NewServer(port int, token, limitDir string) *Server {
@@ -27,24 +29,40 @@ func NewServer(port int, token, limitDir string) *Server {
 }
 
 func (s *Server) Start() {
-	// 捕获 ctrl-c 信号，并关闭服务器
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGINT)
-
-	go func() {
-		<-sigs
-		log.Println("Caught SIGINT, stopping server...")
-		os.Exit(0)
-	}()
-
-	http.HandleFunc("/receiver", s.uploadHandler)
-	log.Printf("Starting server at port %d...\n", s.Port)
-	log.Println("Limit directory: ", s.LimitDir)
-	log.Println("Token: ", s.Token)
-
-	if err := http.ListenAndServe(fmt.Sprintf(":%d", s.Port), nil); err != nil {
-		log.Fatal(err)
+	ln := s.Listener
+	if ln == nil {
+		sigs := make(chan os.Signal, 1)
+		signal.Notify(sigs, syscall.SIGINT)
+		go func() {
+			<-sigs
+			log.Println("Caught SIGINT, stopping server...")
+			os.Exit(0)
+		}()
+		var err error
+		ln, err = net.Listen("tcp", fmt.Sprintf(":%d", s.Port))
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
+	log.Printf("Starting server at port %d, limit=%s, token=%s\n", s.Port, s.LimitDir, s.Token)
+	if err := s.Serve(ln); err != nil && err != http.ErrServerClosed {
+		log.Println(err)
+	}
+}
+
+// Serve serves HTTP on the given listener until it is closed or an error occurs.
+// Exposed for tests.
+func (s *Server) Serve(ln net.Listener) error {
+	srv := &http.Server{Handler: s.Handler()}
+	return srv.Serve(ln)
+}
+
+// Handler returns the HTTP handler used by Start.
+// Exposed for tests.
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/receiver", s.uploadHandler)
+	return mux
 }
 
 func (s *Server) uploadHandler(w http.ResponseWriter, r *http.Request) {
@@ -59,6 +77,11 @@ func (s *Server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid token", http.StatusUnauthorized)
 			return
 		}
+	}
+
+	if r.FormValue("op") == "delete" {
+		s.deleteHandler(w, r)
+		return
 	}
 
 	file, _, err := r.FormFile("file")
@@ -108,4 +131,23 @@ func (s *Server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fmt.Fprintf(w, "File uploaded successfully: %s\n", fullPath)
+}
+
+func (s *Server) deleteHandler(w http.ResponseWriter, r *http.Request) {
+	target := r.FormValue("target")
+	if target == "" {
+		http.Error(w, "Missing target", http.StatusBadRequest)
+		return
+	}
+	if !filepath.IsAbs(target) || !strings.HasPrefix(target, s.LimitDir) {
+		http.Error(w, "Invalid target path, valid path: "+s.LimitDir, http.StatusBadRequest)
+		return
+	}
+	if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Println(err)
+		return
+	}
+	log.Println("Deleted: ", target)
+	fmt.Fprintf(w, "File deleted: %s\n", target)
 }
