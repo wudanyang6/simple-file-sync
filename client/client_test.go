@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -440,109 +439,6 @@ func TestWorker_ContinuesOnUploadError(t *testing.T) {
 	go c.worker(1)
 	c.uploadChan <- syncTask{op: opUpload, path: filepath.Join(dir, "missing.txt")}
 	close(c.uploadChan)
-}
-
-func TestGetGitDiffFiles_NotGitRepoReturnsErr(t *testing.T) {
-	dir := t.TempDir()
-	if _, err := getGitDiffFiles(dir); err == nil {
-		t.Fatal("expected error in non-git directory")
-	}
-}
-
-func TestGetGitDiffFiles_GitMain(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not installed")
-	}
-	dir := t.TempDir()
-	run := func(args ...string) {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	run("init", "-q", "-b", "main")
-	run("config", "user.email", "t@x")
-	run("config", "user.name", "t")
-	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("a"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	run("add", ".")
-	run("commit", "-q", "-m", "init")
-	run("update-ref", "refs/remotes/origin/main", "HEAD")
-	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("changed"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	run("commit", "-aq", "-m", "change")
-
-	files, err := getGitDiffFiles(dir)
-	if err != nil {
-		t.Fatalf("getGitDiffFiles err=%v", err)
-	}
-	found := false
-	for _, f := range files {
-		if strings.HasSuffix(f, "a.txt") {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("expected a.txt in diff, got %v", files)
-	}
-}
-
-func TestCollectFiles_GitMode(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not installed")
-	}
-	dir := t.TempDir()
-	run := func(args ...string) {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	run("init", "-q", "-b", "main")
-	run("config", "user.email", "t@x")
-	run("config", "user.name", "t")
-	if err := os.WriteFile(filepath.Join(dir, "keep.txt"), []byte("k"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "skip.log"), []byte("s"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	run("add", ".")
-	run("commit", "-q", "-m", "init")
-	run("update-ref", "refs/remotes/origin/main", "HEAD")
-	if err := os.WriteFile(filepath.Join(dir, "keep.txt"), []byte("k2"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "skip.log"), []byte("s2"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	run("commit", "-aq", "-m", "ch")
-
-	c := NewClient("git", dir)
-	c.AddIgnorePattern(".*\\.log")
-	files, err := c.CollectFiles(false)
-	if err != nil {
-		t.Fatalf("CollectFiles err=%v", err)
-	}
-	hasKeep, hasSkip := false, false
-	for _, f := range files {
-		if strings.HasSuffix(f, "keep.txt") {
-			hasKeep = true
-		}
-		if strings.HasSuffix(f, "skip.log") {
-			hasSkip = true
-		}
-	}
-	if !hasKeep {
-		t.Fatalf("expected keep.txt in git diff, got %v", files)
-	}
-	if hasSkip {
-		t.Fatalf("ignored file leaked: %v", files)
-	}
 }
 
 func TestCollectFiles_AddsDirsToWatcher(t *testing.T) {

@@ -92,12 +92,25 @@ func TestLoadConfig_BadTOMLErrors(t *testing.T) {
 func TestOverrideConfigWithFlags_BasicFields(t *testing.T) {
 	resetFlags()
 	cfg := &ClientConfig{Mode: "all", LocalDir: "/old"}
-	ClientUploadMode = "git"
+	ClientUploadMode = "all"
 	ClientLocalDir = "/new"
 	ClientTargetName = "prod"
 	overrideConfigWithFlags(cfg)
-	if cfg.Mode != "git" || cfg.LocalDir != "/new" || cfg.ActiveTarget != "prod" {
+	if cfg.Mode != "all" || cfg.LocalDir != "/new" || cfg.ActiveTarget != "prod" {
 		t.Fatalf("override failed: %+v", cfg)
+	}
+}
+
+func TestValidateConfig_GitModeRejected(t *testing.T) {
+	cfg := &ClientConfig{
+		Mode:     "git",
+		LocalDir: "/tmp/x",
+		RemoteTargets: []RemoteTargetConfig{
+			{Name: "dev", ServerAddr: "x", RemoteDir: "/r"},
+		},
+	}
+	if err := validateConfig(cfg); err == nil {
+		t.Fatal("expected error for removed mode=git")
 	}
 }
 

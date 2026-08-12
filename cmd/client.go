@@ -127,8 +127,8 @@ func overrideConfigWithFlags(config *ClientConfig) {
 func validateConfig(config *ClientConfig) error {
 	if config.Mode == "" {
 		config.Mode = "all" // 默认模式
-	} else if config.Mode != "all" && config.Mode != "git" {
-		return fmt.Errorf("不支持的模式: %s，支持的模式: all, git", config.Mode)
+	} else if config.Mode != "all" {
+		return fmt.Errorf("不支持的模式: %s，仅支持: all（mode=git 已移除）", config.Mode)
 	}
 
 	if config.LocalDir == "" {

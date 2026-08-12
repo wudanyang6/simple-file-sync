@@ -6,7 +6,7 @@
 
 - 实时监控文件变化（创建、修改）
 - **可选的删除/重命名传播**（需显式开启），并自带去抖以兼容编辑器原子保存；支持**每个远程目标独立配置**（per-target 优先于全局默认值）
-- 支持全量同步或仅同步 git 差异文件
+- 支持全量同步（`mode=all`）
 - 支持文件忽略模式（正则表达式）
 - 支持路径映射（正则表达式）
 - 支持 TOML 配置文件
@@ -22,7 +22,7 @@ simple-file-sync client --local-dir=/path/to/local --mode=all --remote-dir=/path
 
 #### 主要参数
 
-- `--mode`: 同步模式，支持 `all`（所有文件）或 `git`（仅git差异文件）
+- `--mode`: 同步模式，仅支持 `all`（同步所有文件；`git` 模式已移除）
 - `--local-dir`: 本地目录
 - `--remote-dir`: 远程目录
 - `--server-addr`: 服务器地址
@@ -57,7 +57,7 @@ simple-file-sync client --config=/path/to/config.toml
 #### 示例配置文件
 
 ```toml
-# 客户端模式：all - 同步所有文件，git - 仅同步git差异文件
+# 客户端模式：all - 同步所有文件（git 模式已移除）
 mode = "all"
 
 # 本地目录，将被监控和同步

@@ -8,7 +8,6 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -378,18 +377,6 @@ func (c *Client) CollectFiles(addToWatcher bool) ([]string, error) {
 	switch c.Mode {
 	case "all":
 		log.Printf("Collected files (all): %d", len(filesToUpload))
-	case "git":
-		gitFiles, gerr := getGitDiffFiles(c.LocalDir)
-		if gerr != nil {
-			return nil, gerr
-		}
-		filesToUpload = filesToUpload[:0]
-		for _, file := range gitFiles {
-			if !c.ShouldIgnore(file) {
-				filesToUpload = append(filesToUpload, file)
-			}
-		}
-		log.Printf("Collected files (git): %d", len(filesToUpload))
 	default:
 		return nil, fmt.Errorf("unknown mode: %s", c.Mode)
 	}
@@ -539,29 +526,4 @@ func (c *Client) worker(id int) {
 			log.Printf("Worker %d failed op=%d path=%s err=%v", id, task.op, task.path, err)
 		}
 	}
-}
-
-func getGitDiffFiles(baseDir string) ([]string, error) {
-	cmd := exec.Command("git", "diff", "origin/master", "--name-only")
-	cmd.Dir = baseDir
-	output, err := cmd.Output()
-	if err != nil {
-		log.Printf("Failed to get git diff files: %v try origin/main", err)
-		cmd := exec.Command("git", "diff", "origin/main", "--name-only")
-		cmd.Dir = baseDir
-		output, err = cmd.Output()
-		if err != nil {
-			log.Printf("Failed to get git diff files: %v", err)
-			return nil, err
-		}
-	}
-
-	files := strings.Split(string(output), "\n")
-	var diffFiles []string
-	for _, file := range files {
-		if file != "" {
-			diffFiles = append(diffFiles, filepath.Join(baseDir, file))
-		}
-	}
-	return diffFiles, nil
 }
