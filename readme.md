@@ -12,6 +12,43 @@
 - 支持 TOML 配置文件
 - 支持多远程目标配置
 
+## 安装
+
+### 方式一：go install（需要 Go 1.22+）
+
+```bash
+go install github.com/wudanyang6/simple-file-sync@latest
+```
+
+安装后二进制为 `simple-file-sync`，位于 `$(go env GOPATH)/bin`（默认 `~/go/bin`）。
+若提示 `command not found`，请将 GOPATH/bin 加入 PATH：
+
+```bash
+export PATH=$PATH:$(go env GOPATH)/bin
+```
+
+### 方式二：下载 Release 二进制（无需 Go 环境）
+
+从 [GitHub Releases](https://github.com/wudanyang6/simple-file-sync/releases) 下载对应平台的二进制：
+
+| 平台 | 文件 |
+|---|---|
+| Linux | `simple-file-sync-linux` |
+| macOS | `simple-file-sync-mac` |
+
+```bash
+# 示例：下载并安装 Linux 版本
+curl -L -o simple-file-sync https://github.com/wudanyang6/simple-file-sync/releases/latest/download/simple-file-sync-linux
+chmod +x simple-file-sync
+sudo mv simple-file-sync /usr/local/bin/
+```
+
+验证安装：
+
+```bash
+simple-file-sync --help
+```
+
 ## 使用方法
 
 ### 命令行参数
