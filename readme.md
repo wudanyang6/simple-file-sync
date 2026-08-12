@@ -5,7 +5,7 @@
 ## 功能特点
 
 - 实时监控文件变化（创建、修改）
-- **可选的删除/重命名传播**（需通过 `propagate_deletes` 显式开启），并自带去抖以兼容编辑器原子保存
+- **可选的删除/重命名传播**（需显式开启），并自带去抖以兼容编辑器原子保存；支持**每个远程目标独立配置**（per-target 优先于全局默认值）
 - 支持全量同步或仅同步 git 差异文件
 - 支持文件忽略模式（正则表达式）
 - 支持路径映射（正则表达式）
@@ -28,7 +28,7 @@ simple-file-sync client --local-dir=/path/to/local --mode=all --remote-dir=/path
 - `--server-addr`: 服务器地址
 - `--server-token`: 服务器验证令牌
 - `--target`: 指定要使用的远程目标名称
-- `--propagate-deletes`: 是否将本地的删除/重命名事件同步到远端（默认 `false`，需显式开启；显式传入会覆盖配置文件）
+- `--propagate-deletes`: 是否将本地的删除/重命名事件同步到远端（默认 `false`，需显式开启；显式传入会覆盖配置文件）。这是**全局默认值**，每个远程目标可以在配置文件中通过 `propagate_deletes` 单独覆盖（见下文）
 
 #### 忽略和映射
 
@@ -66,7 +66,8 @@ local_dir = "/Users/username/projects/my-project"
 # 当前激活的远程目标名称
 active_target = "dev"
 
-# 是否将本地的删除/重命名同步到远端，默认 false（不打开就只同步新增/修改）
+# 是否将本地的删除/重命名同步到远端，默认 false（全局默认值；
+# 每个远程目标可在 remote_targets 内用 propagate_deletes 单独覆盖）
 propagate_deletes = false
 
 # 忽略模式 (全值匹配，正则表达式)
@@ -99,13 +100,17 @@ name = "dev"
 server_addr = "http://127.0.0.1:8120/receiver"
 remote_dir = "/path/to/dev"
 token = "dev-token"
+propagate_deletes = true   # 可选：dev 环境同步删除（覆盖全局默认值）
 
 [[remote_targets]]
 name = "production"
 server_addr = "http://example.com:8120/receiver"
 remote_dir = "/path/to/production"
 token = "production-token"
+# 未配置 propagate_deletes：生产环境跟随全局默认值（此处为 false，不删）
 ```
+
+> 删除传播的最终判定：**远程目标内显式配置的 `propagate_deletes` 优先**；未配置时回退到全局 `propagate_deletes` / `--propagate-deletes`（默认 `false`）。判定发生在事件到达时，依据**当前激活目标**（`active_target`）的配置。
 
 更多示例请参考 `examples/simple-file-sync.toml`。
 
@@ -138,7 +143,7 @@ simple-file-sync server --port=8120 --token=your-secret-token --limit-dir=/path/
 
 - `Create` / `Write` → 调度上传任务（`op=upload`）
 - `Remove` / `Rename`：
-  - 如果 **未** 开启 `propagate_deletes`，事件被忽略，远端文件保持不变（默认行为）
+  - 如果当前激活目标的删除传播**未开启**（per-target 未配置时看全局 `propagate_deletes`，默认 `false`），事件被忽略，远端文件保持不变（默认行为）
   - 如果开启，则进入删除去抖窗口；窗口内若同路径再次 `Create`/`Write`，则取消删除（典型场景：编辑器原子保存）；去抖到期后下发 `op=delete`
 
 去抖时间默认 `500ms`（可在代码里通过 `DeleteDebounce` 调整）。删除只针对单个文件路径，不会递归删目录。

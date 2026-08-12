@@ -58,6 +58,39 @@ func TestSetActiveTarget(t *testing.T) {
 	}
 }
 
+func TestDeletesEnabled_PerTargetExplicitTrue(t *testing.T) {
+	c := NewClient("all", "/tmp")
+	enabled := true
+	c.AddRemoteTargetWithDeletes("dev", "http://x", "/r/dev", "tk1", &enabled)
+	c.PropagateDeletes = false
+	if !c.deletesEnabled() {
+		t.Fatal("per-target explicit true should override global false")
+	}
+}
+
+func TestDeletesEnabled_PerTargetExplicitFalse(t *testing.T) {
+	c := NewClient("all", "/tmp")
+	disabled := false
+	c.AddRemoteTargetWithDeletes("dev", "http://x", "/r/dev", "tk1", &disabled)
+	c.PropagateDeletes = true
+	if c.deletesEnabled() {
+		t.Fatal("per-target explicit false should override global true")
+	}
+}
+
+func TestDeletesEnabled_FallsBackToGlobal(t *testing.T) {
+	c := NewClient("all", "/tmp")
+	c.AddRemoteTarget("dev", "http://x", "/r/dev", "tk1") // nil：未显式配置
+	c.PropagateDeletes = true
+	if !c.deletesEnabled() {
+		t.Fatal("should fall back to global true when target unset")
+	}
+	c.PropagateDeletes = false
+	if c.deletesEnabled() {
+		t.Fatal("should fall back to global false when target unset")
+	}
+}
+
 func TestGetActiveTarget(t *testing.T) {
 	c := NewClient("all", "/tmp")
 	if _, err := c.GetActiveTarget(); err == nil {
@@ -684,6 +717,79 @@ func TestWatcherThread_RemoveIgnoredWhenPropagateDisabled(t *testing.T) {
 	for task := range c.uploadChan {
 		if task.op == opDelete {
 			t.Fatalf("delete should not propagate when disabled, got %+v", task)
+		}
+	}
+}
+
+func TestWatcherThread_PerTargetEnabledSchedulesDelete(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "doomed.txt")
+	if err := os.WriteFile(target, []byte("bye"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := NewClient("all", dir)
+	c.watcher = w
+	c.uploadChan = make(chan syncTask, 8)
+	// 全局关闭，per-target 显式开启：删除仍应传播
+	enabled := true
+	c.AddRemoteTargetWithDeletes("dev", "http://x", "/r/dev", "tk1", &enabled)
+	c.DeleteDebounce = 30 * time.Millisecond
+
+	go c.watcherThread()()
+	time.Sleep(50 * time.Millisecond)
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case task := <-c.uploadChan:
+			if task.op == opDelete && task.path == target {
+				w.Close()
+				return
+			}
+		case <-deadline:
+			w.Close()
+			t.Fatal("did not observe scheduled delete")
+		}
+	}
+}
+
+func TestWatcherThread_PerTargetDisabledOverridesGlobal(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "keep.txt")
+	if err := os.WriteFile(target, []byte("v"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := NewClient("all", dir)
+	c.watcher = w
+	c.uploadChan = make(chan syncTask, 8)
+	// 全局开启，per-target 显式关闭：删除不应传播
+	disabled := false
+	c.AddRemoteTargetWithDeletes("dev", "http://x", "/r/dev", "tk1", &disabled)
+	c.PropagateDeletes = true
+	c.DeleteDebounce = 30 * time.Millisecond
+
+	go c.watcherThread()()
+	time.Sleep(50 * time.Millisecond)
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	w.Close()
+	close(c.uploadChan)
+	for task := range c.uploadChan {
+		if task.op == opDelete {
+			t.Fatalf("delete should not propagate when per-target disabled, got %+v", task)
 		}
 	}
 }

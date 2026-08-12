@@ -47,6 +47,10 @@ type RemoteTarget struct {
 	URL       string
 	TargetDir string
 	Token     string
+	// PropagateDeletesSet 表示该目标是否在配置中显式声明了 propagate_deletes。
+	// 显式声明时优先于 Client.PropagateDeletes（全局默认值）。
+	PropagateDeletesSet bool
+	PropagateDeletes    bool
 }
 
 type Client struct {
@@ -85,13 +89,16 @@ func NewClient(mode, baseDir string) *Client {
 	}
 }
 
-// AddRemoteTarget 添加一个远程目标
-func (c *Client) AddRemoteTarget(name, url, targetDir, token string) {
+// AddRemoteTargetWithDeletes 添加一个远程目标；propagateDeletes 为 nil 表示未显式配置，
+// 删除传播回退到全局 Client.PropagateDeletes。
+func (c *Client) AddRemoteTargetWithDeletes(name, url, targetDir, token string, propagateDeletes *bool) {
 	c.RemoteTargets = append(c.RemoteTargets, RemoteTarget{
-		Name:      name,
-		URL:       url,
-		TargetDir: targetDir,
-		Token:     token,
+		Name:                name,
+		URL:                 url,
+		TargetDir:           targetDir,
+		Token:               token,
+		PropagateDeletesSet: propagateDeletes != nil,
+		PropagateDeletes:    propagateDeletes != nil && *propagateDeletes,
 	})
 
 	// 如果是第一个添加的目标，默认设为激活状态
@@ -100,6 +107,12 @@ func (c *Client) AddRemoteTarget(name, url, targetDir, token string) {
 	}
 
 	log.Printf("Added remote target: %s -> %s", name, url)
+}
+
+// AddRemoteTarget 添加一个远程目标，删除传播使用全局默认（等价于
+// AddRemoteTargetWithDeletes 传入 nil）。
+func (c *Client) AddRemoteTarget(name, url, targetDir, token string) {
+	c.AddRemoteTargetWithDeletes(name, url, targetDir, token, nil)
 }
 
 // SetActiveTarget 设置当前激活的远程目标
@@ -122,6 +135,17 @@ func (c *Client) GetActiveTarget() (*RemoteTarget, error) {
 		}
 	}
 	return nil, fmt.Errorf("no active remote target set")
+}
+
+// deletesEnabled 判断删除传播在当前激活目标上是否开启：
+// active target 显式配置了 propagate_deletes 时优先使用该值，
+// 否则回退到全局 Client.PropagateDeletes（默认关闭）。
+func (c *Client) deletesEnabled() bool {
+	t, err := c.GetActiveTarget()
+	if err == nil && t.PropagateDeletesSet {
+		return t.PropagateDeletes
+	}
+	return c.PropagateDeletes
 }
 
 // ListRemoteTargets 列出所有可用的远程目标
@@ -259,12 +283,12 @@ func (c *Client) watcherThread() func() {
 					c.cancelPendingDelete(event.Name)
 					time.Sleep(2 * time.Second)
 					c.uploadChan <- syncTask{op: opUpload, path: event.Name}
-				case event.Op&fsnotify.Remove == fsnotify.Remove,
-					event.Op&fsnotify.Rename == fsnotify.Rename:
-					if !c.PropagateDeletes {
-						log.Println("Delete propagation disabled, ignoring:", event.Name)
-						continue
-					}
+			case event.Op&fsnotify.Remove == fsnotify.Remove,
+				event.Op&fsnotify.Rename == fsnotify.Rename:
+				if !c.deletesEnabled() {
+					log.Println("Delete propagation disabled, ignoring:", event.Name)
+					continue
+				}
 					log.Println("Detected file removal/rename, scheduling delete:", event.Name)
 					c.scheduleDelete(event.Name)
 				}

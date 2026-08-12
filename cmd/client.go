@@ -37,6 +37,8 @@ type RemoteTargetConfig struct {
 	ServerAddr string `toml:"server_addr"`
 	RemoteDir  string `toml:"remote_dir"`
 	Token      string `toml:"token"`
+	// PropagateDeletes 可选：nil=未配置，删除传播回退到全局 propagate_deletes
+	PropagateDeletes *bool `toml:"propagate_deletes"`
 }
 
 // ClientConfig 表示客户端配置文件结构
@@ -247,7 +249,7 @@ func buildClient(config *ClientConfig) (*client.Client, error) {
 	c.PropagateDeletes = config.PropagateDeletes
 
 	for _, target := range config.RemoteTargets {
-		c.AddRemoteTarget(target.Name, target.ServerAddr, target.RemoteDir, target.Token)
+		c.AddRemoteTargetWithDeletes(target.Name, target.ServerAddr, target.RemoteDir, target.Token, target.PropagateDeletes)
 	}
 
 	if err := c.SetActiveTarget(config.ActiveTarget); err != nil {

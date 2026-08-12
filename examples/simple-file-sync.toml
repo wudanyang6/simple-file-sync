@@ -8,6 +8,10 @@ local_dir = "/Users/wudanyang/self/simple-file-sync"
 # 当前激活的远程目标名称
 active_target = "icoding-dev"
 
+# 删除/重命名同步的全局默认值（默认 false）。
+# 每个远程目标可在 remote_targets 内用 propagate_deletes 单独覆盖（优先级更高）
+propagate_deletes = false
+
 # 忽略模式 (全值匹配，正则表达式)
 ignore = [
     ".*/\\.tmp$",
@@ -37,9 +41,13 @@ name = "example-prod"
 server_addr = "http://10.25.78.81:8120/receiver"
 remote_dir = "/home/users/wudanyang/wudanyang/example-simple-file-sync-prod"
 token = "123456"
+# per-target 删除同步开关（可选）：显式 false，即使全局开启也不删
+propagate_deletes = false
 
 [[remote_targets]]
 name = "example-dev"
 server_addr = "http://10.25.78.81:8122/receiver"
 remote_dir = "/home/users/wudanyang/wudanyang/example-simple-file-sync-dev"
 token = "123456"
+# per-target 删除同步开关（可选）：显式 true，即使全局关闭也会同步删除
+propagate_deletes = true

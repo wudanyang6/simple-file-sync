@@ -351,3 +351,82 @@ func TestBuildClient_PropagatesDeleteFlag(t *testing.T) {
 		t.Fatal("client.PropagateDeletes should be true")
 	}
 }
+
+func TestLoadConfig_PerTargetPropagateDeletes(t *testing.T) {
+	resetFlags()
+	dir := t.TempDir()
+	body := `mode = "all"
+local_dir = "/tmp/x"
+active_target = "dev"
+
+[[remote_targets]]
+name = "dev"
+server_addr = "http://x"
+remote_dir = "/r"
+token = "tk"
+propagate_deletes = true
+
+[[remote_targets]]
+name = "prod"
+server_addr = "http://y"
+remote_dir = "/r2"
+token = "tk2"
+propagate_deletes = false
+
+[[remote_targets]]
+name = "stage"
+server_addr = "http://z"
+remote_dir = "/r3"
+token = "tk3"
+`
+	path := writeTOML(t, dir, "p.toml", body)
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.RemoteTargets) != 3 {
+		t.Fatalf("expected 3 targets, got %d", len(cfg.RemoteTargets))
+	}
+	dev, prod, stage := cfg.RemoteTargets[0], cfg.RemoteTargets[1], cfg.RemoteTargets[2]
+	if dev.PropagateDeletes == nil || !*dev.PropagateDeletes {
+		t.Fatalf("dev should be explicit true, got %v", dev.PropagateDeletes)
+	}
+	if prod.PropagateDeletes == nil || *prod.PropagateDeletes {
+		t.Fatalf("prod should be explicit false, got %v", prod.PropagateDeletes)
+	}
+	if stage.PropagateDeletes != nil {
+		t.Fatalf("stage should be unset (nil), got %v", stage.PropagateDeletes)
+	}
+}
+
+func TestBuildClient_PropagatesPerTargetDeletes(t *testing.T) {
+	enabled := true
+	disabled := false
+	cfg := &ClientConfig{
+		Mode:         "all",
+		LocalDir:     "/tmp/x",
+		ActiveTarget: "dev",
+		RemoteTargets: []RemoteTargetConfig{
+			{Name: "dev", ServerAddr: "x", RemoteDir: "/r", PropagateDeletes: &enabled},
+			{Name: "prod", ServerAddr: "y", RemoteDir: "/r2", PropagateDeletes: &disabled},
+			{Name: "stage", ServerAddr: "z", RemoteDir: "/r3"},
+		},
+	}
+	c, err := buildClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.RemoteTargets) != 3 {
+		t.Fatalf("expected 3 targets, got %d", len(c.RemoteTargets))
+	}
+	dev, prod, stage := c.RemoteTargets[0], c.RemoteTargets[1], c.RemoteTargets[2]
+	if !dev.PropagateDeletesSet || !dev.PropagateDeletes {
+		t.Fatalf("dev should be explicit true, got %+v", dev)
+	}
+	if !prod.PropagateDeletesSet || prod.PropagateDeletes {
+		t.Fatalf("prod should be explicit false, got %+v", prod)
+	}
+	if stage.PropagateDeletesSet || stage.PropagateDeletes {
+		t.Fatalf("stage should fall back to global (unset/false), got %+v", stage)
+	}
+}
