@@ -65,6 +65,20 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
+// pathWithinLimit reports whether target is an absolute path equal to or
+// contained within s.LimitDir. filepath.Rel cleans both paths, so it rejects
+// `..` traversal as well as sibling-prefix confusion such as /data vs /data2.
+func (s *Server) pathWithinLimit(target string) bool {
+	if !filepath.IsAbs(target) {
+		return false
+	}
+	rel, err := filepath.Rel(s.LimitDir, target)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
 func (s *Server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
@@ -98,7 +112,7 @@ func (s *Server) uploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Println("Uploading to: ", fullPath)
 
-	if !filepath.IsAbs(fullPath) || !strings.HasPrefix(fullPath, s.LimitDir) {
+	if !s.pathWithinLimit(fullPath) {
 		http.Error(w, "Invalid target path, valid path: "+s.LimitDir, http.StatusBadRequest)
 		return
 	}
@@ -139,11 +153,13 @@ func (s *Server) deleteHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Missing target", http.StatusBadRequest)
 		return
 	}
-	if !filepath.IsAbs(target) || !strings.HasPrefix(target, s.LimitDir) {
+	if !s.pathWithinLimit(target) {
 		http.Error(w, "Invalid target path, valid path: "+s.LimitDir, http.StatusBadRequest)
 		return
 	}
-	if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+	// os.RemoveAll handles both files and directories and is idempotent for
+	// missing paths, so a client delete of a removed directory tree succeeds.
+	if err := os.RemoveAll(target); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		log.Println(err)
 		return

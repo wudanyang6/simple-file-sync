@@ -398,13 +398,13 @@ func TestUpload_OpDelete_MissingTarget(t *testing.T) {
 	}
 }
 
-func TestUpload_OpDelete_TargetIsDirectoryFails(t *testing.T) {
+func TestUpload_OpDelete_RemovesDirectoryTree(t *testing.T) {
 	s, dir := newServer(t, "tk")
 	sub := filepath.Join(dir, "subdir")
-	if err := os.Mkdir(sub, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(sub, "nested"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(sub, "blocker.txt"), []byte("x"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(sub, "nested", "blocker.txt"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	body, ct := buildUpload(t, map[string]string{"token": "tk", "op": "delete", "target": sub}, "", "")
@@ -412,7 +412,25 @@ func TestUpload_OpDelete_TargetIsDirectoryFails(t *testing.T) {
 	req.Header.Set("Content-Type", ct)
 	rr := httptest.NewRecorder()
 	s.uploadHandler(rr, req)
-	if rr.Code != http.StatusInternalServerError {
-		t.Fatalf("status=%d want 500", rr.Code)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if _, err := os.Stat(sub); !os.IsNotExist(err) {
+		t.Fatalf("directory should be gone, stat err=%v", err)
+	}
+}
+
+func TestUpload_OpDelete_SiblingPrefixRejected(t *testing.T) {
+	s, dir := newServer(t, "tk")
+	// A sibling path that shares the limit-dir string as a prefix must not be
+	// accepted by a naive HasPrefix check.
+	sibling := dir + "-suffix"
+	body, ct := buildUpload(t, map[string]string{"token": "tk", "op": "delete", "target": sibling}, "", "")
+	req := httptest.NewRequest(http.MethodPost, "/receiver", body)
+	req.Header.Set("Content-Type", ct)
+	rr := httptest.NewRecorder()
+	s.uploadHandler(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d want 400", rr.Code)
 	}
 }

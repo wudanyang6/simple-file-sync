@@ -170,7 +170,7 @@ simple-file-sync server --port=8120 --token=your-secret-token --limit-dir=/path/
 | op       | 字段                                  | 行为                                                  |
 | -------- | ------------------------------------- | ----------------------------------------------------- |
 | `upload` | `token`, `target`, `file`             | 写入 `target`，按需创建父目录                         |
-| `delete` | `token`, `target`                     | 删除 `target`；目标不存在时返回 200（幂等），不递归   |
+| `delete` | `token`, `target`                     | 递归删除 `target`（文件或目录树）；目标不存在时返回 200（幂等） |
 
 `target` 必须是绝对路径并落在 `--limit-dir` 之内，否则返回 400。
 
@@ -183,7 +183,7 @@ simple-file-sync server --port=8120 --token=your-secret-token --limit-dir=/path/
   - 如果当前激活目标的删除传播**未开启**（per-target 未配置时看全局 `propagate_deletes`，默认 `false`），事件被忽略，远端文件保持不变（默认行为）
   - 如果开启，则进入删除去抖窗口；窗口内若同路径再次 `Create`/`Write`，则取消删除（典型场景：编辑器原子保存）；去抖到期后下发 `op=delete`
 
-去抖时间默认 `500ms`（可在代码里通过 `DeleteDebounce` 调整）。删除只针对单个文件路径，不会递归删目录。
+去抖时间默认 `500ms`（可在代码里通过 `DeleteDebounce` 调整）。删除会递归删除对应路径（单个文件或整个目录树）。
 
 ## 优先级
 
